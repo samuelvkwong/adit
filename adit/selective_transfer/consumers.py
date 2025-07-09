@@ -2,9 +2,12 @@ import asyncio
 import contextlib
 import logging
 import threading
+import shutil
+
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Iterator, Literal, cast
+from pathlib import Path
 
 from adit_radis_shared.accounts.models import User
 from adit_radis_shared.common.utils.debounce import debounce
@@ -13,6 +16,8 @@ from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from crispy_forms.utils import render_crispy_form
 from django.conf import settings
+from pydicom import Dataset
+
 from django.template.loader import render_to_string
 from requests.exceptions import HTTPError
 
@@ -20,6 +25,8 @@ from adit.core.errors import DicomError, RetriableDicomError
 from adit.core.models import DicomNode
 from adit.core.utils.dicom_dataset import QueryDataset, ResultDataset
 from adit.core.utils.dicom_operator import DicomOperator
+from adit.core.utils.dicom_utils import write_dataset
+from adit.core.utils.sanitize import sanitize_filename
 
 from .forms import SelectiveTransferJobForm
 from .models import SelectiveTransferJob, SelectiveTransferTask
@@ -74,7 +81,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             return
 
         action: str = content.get("action", "")
-        if action not in ["query", "cancel", "reset", "transfer"]:
+        if action not in ["query", "cancel", "reset", "transfer", "direct_download"]:
             await self.send(render_error_message(f"Invalid action to process: {action}"))
             return
 
@@ -111,6 +118,16 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             else:
                 form_error_response = await self._build_form_error_response(
                     form, "Please correct the form errors and transfer again."
+                )
+                await self.send(form_error_response)
+        
+        elif action == "direct_download":
+            logger.debug("Direct download action received.")
+            if form_valid:
+                asyncio.create_task(self._direct_download(form))
+            else:
+                form_error_response = await self._build_form_error_response(
+                    form, "Please correct the form errors and download again."
                 )
                 await self.send(form_error_response)
 
@@ -338,3 +355,131 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             job.queue_pending_tasks()
 
         return job
+    
+    async def _direct_download(self, form: SelectiveTransferJobForm) -> None:
+        selected_studies: str | list[str] | None = form.data.get("selected_studies")
+        if selected_studies is not None:
+            if isinstance(selected_studies, str):
+                selected_studies = [selected_studies]
+
+            loop = asyncio.get_event_loop()
+            try:
+                await loop.run_in_executor(
+                    self.pool, self._prepare_and_send_download_response, form, selected_studies
+                )
+            except HTTPError as e:
+                status_code = e.response.status_code
+                additional_error_text = ""
+                if status_code == 400:  # Bad request
+                    additional_error_text = "The source did not understand the ADIT request."
+                elif status_code == 401 or status_code == 403:  # Unauthorized or forbidden
+                    additional_error_text = "ADIT is not authorized to access the source."
+                elif status_code == 500:  # Internal server error
+                    additional_error_text = "The source could not process the ADIT request."
+                elif status_code == 502:  # Bad gateway
+                    additional_error_text = "The source is not available."
+                form_error_response = await self._build_form_error_response(
+                    form, f"Something went wrong at your requested source. {additional_error_text}"
+                )
+                await self.send(form_error_response)
+            except (DicomError, RetriableDicomError):
+                form_error_response = await self._build_form_error_response(
+                    form,
+                    "Something went wrong at your requested source. "
+                    "A Dicom Error has occured at the source.",
+                )
+                await self.send(form_error_response)
+            except Exception:
+                form_error_response = await self._build_form_error_response(
+                    form, "Something went wrong."
+                )
+                await self.send(form_error_response)
+
+    def _prepare_and_send_download_response(
+        self, form: SelectiveTransferJobForm, selected_studies: list[str]
+    ) -> None:
+        with lock:
+            source = cast(DicomNode, form.cleaned_data["source"])
+            assert source.node_type == DicomNode.NodeType.SERVER
+            operator = DicomOperator(source.dicomserver)
+
+            self.query_operators.append(operator)
+
+        try:
+            zip_file_name = self.prepare_download(operator, form, selected_studies)
+            self.send_download_response(form, zip_file_name)
+
+        except ConnectionError:
+            # Ignore connection aborts (most probably from ourself)
+            # Maybe we should check here if we really aborted the connection
+            pass
+
+        finally:
+            with lock:
+                if operator in self.query_operators:
+                    self.query_operators.remove(operator)
+
+        return None
+
+    #TODO: Do further preprocessing following adit.core.processor._download_to_folder  
+    def prepare_download(
+        self,
+        operator: DicomOperator,
+        form: SelectiveTransferJobForm,
+        selected_studies: list[str],
+        #study_folder: Path,
+        #modifier: Callable,
+    ):
+        study_folder = Path("/tmp/test_study_folder")
+        
+        def callback(ds: Dataset | None) -> None:
+            if ds is None:
+                return
+
+            #modifier(ds)
+
+            final_folder: Path
+            if settings.CREATE_SERIES_SUB_FOLDERS:
+                series_folder_name = sanitize_filename(f"{ds.SeriesNumber}-{ds.SeriesDescription}")
+                final_folder = study_folder / series_folder_name
+            else:
+                final_folder = study_folder
+
+            final_folder.mkdir(parents=True, exist_ok=True)
+            file_name = sanitize_filename(f"{ds.SOPInstanceUID}.dcm")
+            file_path = final_folder / file_name
+            write_dataset(ds, file_path)
+        
+        for selected_study in selected_studies:
+            study_data = selected_study.split("\\")
+            patient_id = study_data[0]
+            study_uid = study_data[1]
+            logger.debug("Download study with patient_id: %s, study_uid: %s", patient_id, study_uid)
+            operator.fetch_study(
+                patient_id=patient_id,
+                study_uid=study_uid,
+                callback=callback,
+            )
+        # Zip the study folder
+        zip_file_path = shutil.make_archive(str(study_folder), 'zip', root_dir=study_folder)
+        
+        # Return the name of the zipped study folder
+        zip_file_name = Path(zip_file_path).name
+        return zip_file_name  
+
+
+    @debounce()
+    def send_download_response(
+        self,
+        form: SelectiveTransferJobForm,
+        zip_file_name,
+    ) -> None:
+        # Rerender form to remove potential previous error messages
+        rendered_form = render_crispy_form(form)
+
+        rendered_download_url = render_to_string(
+            "selective_transfer/_download_url.html",
+            {"download": True, "file_name": zip_file_name},
+        )
+
+        async_to_sync(self.send)(rendered_form + rendered_download_url)

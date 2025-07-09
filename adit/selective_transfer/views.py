@@ -1,9 +1,14 @@
+import os
+
 from typing import Any
 
 from adit_radis_shared.common.types import AuthenticatedHttpRequest
 from adit_radis_shared.common.views import BaseUpdatePreferencesView
 from django.core.exceptions import BadRequest
 from django.urls import reverse_lazy
+from django.views.generic.base import View
+from django.contrib.auth.mixins import LoginRequiredMixin
+from django.http import Http404, HttpResponse
 
 from adit.core.views import (
     DicomJobCancelView,
@@ -33,6 +38,26 @@ SELECTIVE_TRANSFER_URGENT = "selective_transfer_urgent"
 SELECTIVE_TRANSFER_SEND_FINISHED_MAIL = "selective_transfer_send_finished_mail"
 SELECTIVE_TRANSFER_ADVANCED_OPTIONS_COLLAPSED = "selective_transfer_advanced_options_collapsed"
 
+
+class SelectiveTransferDownloadStudyView(SelectiveTransferLockedMixin, LoginRequiredMixin,
+View
+):
+    def get(self, request, *args, **kwargs):
+        file_name = kwargs.get("file_name")
+        file_path = os.path.join("/tmp", file_name)
+
+        if not os.path.exists(file_path):
+            raise Http404("File not found.")
+
+        with open(file_path, "rb") as f:
+            file_content = f.read()
+
+        response = HttpResponse(
+            content=file_content,
+            content_type="application/zip",
+        )
+        response["Content-Disposition"] = f"attachment;filename={file_name}"
+        return response
 
 class SelectiveTransferUpdatePreferencesView(
     SelectiveTransferLockedMixin, BaseUpdatePreferencesView
