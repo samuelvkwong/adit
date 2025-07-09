@@ -3,11 +3,13 @@ import contextlib
 import logging
 import threading
 import shutil
+import zipfile
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Any, Iterator, Literal, cast
 from pathlib import Path
+from io import BytesIO
 
 from adit_radis_shared.accounts.models import User
 from adit_radis_shared.common.utils.debounce import debounce
@@ -430,25 +432,15 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         #study_folder: Path,
         #modifier: Callable,
     ):
-        study_folder = Path("/tmp/test_study_folder")
-        
+        study_folder_name = "test_study_folder"
+        study_folder_zip_path = Path("/tmp") / f"{study_folder_name}.zip"
+
+        received_datasets: list[Dataset] = []
+
         def callback(ds: Dataset | None) -> None:
             if ds is None:
                 return
-
-            #modifier(ds)
-
-            final_folder: Path
-            if settings.CREATE_SERIES_SUB_FOLDERS:
-                series_folder_name = sanitize_filename(f"{ds.SeriesNumber}-{ds.SeriesDescription}")
-                final_folder = study_folder / series_folder_name
-            else:
-                final_folder = study_folder
-
-            final_folder.mkdir(parents=True, exist_ok=True)
-            file_name = sanitize_filename(f"{ds.SOPInstanceUID}.dcm")
-            file_path = final_folder / file_name
-            write_dataset(ds, file_path)
+            received_datasets.append(ds)
         
         for selected_study in selected_studies:
             study_data = selected_study.split("\\")
@@ -460,12 +452,34 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
                 study_uid=study_uid,
                 callback=callback,
             )
-        # Zip the study folder
-        zip_file_path = shutil.make_archive(str(study_folder), 'zip', root_dir=study_folder)
+
+        logger.debug("Length of received datasets: %d", len(received_datasets))
         
-        # Return the name of the zipped study folder
-        zip_file_name = Path(zip_file_path).name
-        return zip_file_name  
+        # After all fetch_study calls are done, zip them in-memory
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zip_file:
+            for ds in received_datasets:
+                # Determine path inside zip
+                if settings.CREATE_SERIES_SUB_FOLDERS:
+                    series_folder_name = sanitize_filename(f"{ds.SeriesNumber}-{ds.SeriesDescription}")
+                    internal_path = f"{series_folder_name}/"
+                else:
+                    internal_path = ""
+
+                file_name = sanitize_filename(f"{ds.SOPInstanceUID}.dcm")
+                zip_internal_path = f"{internal_path}{file_name}"
+
+                stream = BytesIO()
+                write_dataset(ds, stream)
+                stream_bytes = stream.getvalue()
+
+                zip_file.writestr(zip_internal_path, stream_bytes)
+
+        with open(study_folder_zip_path, 'wb') as f:
+            f.write(zip_buffer.getvalue())
+
+        return study_folder_zip_path.name
+        
 
 
     @debounce()
