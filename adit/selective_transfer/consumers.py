@@ -458,8 +458,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         logger.debug("Length of received datasets: %d", len(received_datasets))
         
         # Zip the study
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zip_file:
+        with zipfile.ZipFile(study_folder_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zip_file:
             for ds in received_datasets:
                 # Determine path inside zip
                 if settings.CREATE_SERIES_SUB_FOLDERS:
@@ -476,9 +475,6 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
                 stream_bytes = stream.getvalue()
 
                 zip_file.writestr(zip_internal_path, stream_bytes)
-
-        with open(study_folder_zip_path, 'wb') as f:
-            f.write(zip_buffer.getvalue())
 
         return study_folder_zip_path.name
         
