@@ -442,20 +442,22 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
                 return
             received_datasets.append(ds)
         
-        for selected_study in selected_studies:
-            study_data = selected_study.split("\\")
-            patient_id = study_data[0]
-            study_uid = study_data[1]
-            logger.debug("Download study with patient_id: %s, study_uid: %s", patient_id, study_uid)
-            operator.fetch_study(
-                patient_id=patient_id,
-                study_uid=study_uid,
-                callback=callback,
-            )
+        # Need to refactor for multiple selected studies
+        #for selected_study in selected_studies:
+        selected_study = selected_studies[0]
+        study_data = selected_study.split("\\")
+        patient_id = study_data[0]
+        study_uid = study_data[1]
+        logger.debug("Download study with patient_id: %s, study_uid: %s", patient_id, study_uid)
+        operator.fetch_study(
+            patient_id=patient_id,
+            study_uid=study_uid,
+            callback=callback,
+        )
 
         logger.debug("Length of received datasets: %d", len(received_datasets))
         
-        # After all fetch_study calls are done, zip them in-memory
+        # Zip the study
         zip_buffer = BytesIO()
         with zipfile.ZipFile(zip_buffer, 'w', compression=zipfile.ZIP_DEFLATED) as zip_file:
             for ds in received_datasets:
