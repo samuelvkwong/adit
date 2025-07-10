@@ -444,10 +444,10 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         )
         zipped_studies_filename = self.download_studies(
             operator,
-            pseudonym,
             selected_studies,
             download_folder,
             modifier,
+            pseudonym,
         )
 
         return zipped_studies_filename
@@ -455,10 +455,10 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
     def download_studies(
         self,
         operator: DicomOperator,
-        pseudonym: str,
         selected_studies: list[str],
         download_folder: Path,
         modifier: Callable,
+        pseudonym: str,
     ):
         # TODO: Dynamically generate studies folder name
         studies_folder_name = "selected_studies"
@@ -473,21 +473,16 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             modifier(ds)
             study_datasets.append(ds)
         
-        # Need to refactor for multiple selected studies
         with zipfile.ZipFile(studies_folder_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zip_file:
             for selected_study in selected_studies:
                 study_data = selected_study.split("\\")
                 patient_id = study_data[0]
                 study_uid = study_data[1]
-                logger.debug("Download study with patient_id: %s, study_uid: %s", patient_id, study_uid)
                 operator.fetch_study(
                     patient_id=patient_id,
                     study_uid=study_uid,
                     callback=callback,
-                )
-
-                logger.debug("Length of fetched datasets: %d", len(study_datasets))
-                
+                )                
                 # Zip the study
                 for ds in study_datasets:
                     # Determine path inside zip
