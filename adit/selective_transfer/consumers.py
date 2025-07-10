@@ -7,9 +7,10 @@ import zipfile
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Any, Iterator, Literal, cast
+from typing import Any, Iterator, Literal, cast, Callable
 from pathlib import Path
 from io import BytesIO
+from functools import partial
 
 from adit_radis_shared.accounts.models import User
 from adit_radis_shared.common.utils.debounce import debounce
@@ -29,6 +30,7 @@ from adit.core.utils.dicom_dataset import QueryDataset, ResultDataset
 from adit.core.utils.dicom_operator import DicomOperator
 from adit.core.utils.dicom_utils import write_dataset
 from adit.core.utils.sanitize import sanitize_filename
+from adit.core.utils.dicom_manipulator import DicomManipulator
 
 from .forms import SelectiveTransferJobForm
 from .models import SelectiveTransferJob, SelectiveTransferTask
@@ -423,60 +425,106 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
 
         return None
 
-    #TODO: Do further preprocessing following adit.core.processor._download_to_folder  
     def prepare_download(
         self,
         operator: DicomOperator,
         form: SelectiveTransferJobForm,
         selected_studies: list[str],
-        #study_folder: Path,
-        #modifier: Callable,
-    ):
-        study_folder_name = "test_study_folder"
-        study_folder_zip_path = Path("/tmp") / f"{study_folder_name}.zip"
+    ) -> Path:
+        download_folder = Path("/tmp") #settings.TEMPORARY_DIRECTORY
 
-        received_datasets: list[Dataset] = []
+        dicom_manipulator = DicomManipulator()
+        pseudonym = form.cleaned_data["pseudonym"]
+
+        modifier = partial(
+            dicom_manipulator.manipulate,
+            pseudonym=pseudonym,
+            trial_protocol_id=form.cleaned_data["trial_protocol_id"],
+            trial_protocol_name=form.cleaned_data["trial_protocol_name"],
+        )
+        zipped_studies_filename = self.download_studies(
+            operator,
+            pseudonym,
+            selected_studies,
+            download_folder,
+            modifier,
+        )
+
+        return zipped_studies_filename
+
+    #TODO: Do further preprocessing following adit.core.processor._download_to_folder  
+    # Alternative: async function that fetches study, pushed received datasets to a queue
+    # Have another async function process received datasets and write to zip file
+    # Possible to write to zip stream within callback? Write to io buffer and then 
+    def download_studies(
+        self,
+        operator: DicomOperator,
+        pseudonym: str,
+        selected_studies: list[str],
+        download_folder: Path,
+        modifier: Callable,
+    ):
+        # TODO: Dynamically generate studies folder name
+        studies_folder_name = "selected_studies"
+        studies_folder_zip_path = download_folder / f"{studies_folder_name}.zip"
+        
+        study_datasets: list[Dataset] = []
 
         def callback(ds: Dataset | None) -> None:
             if ds is None:
                 return
-            received_datasets.append(ds)
+
+            modifier(ds)
+            study_datasets.append(ds)
         
         # Need to refactor for multiple selected studies
-        #for selected_study in selected_studies:
-        selected_study = selected_studies[0]
-        study_data = selected_study.split("\\")
-        patient_id = study_data[0]
-        study_uid = study_data[1]
-        logger.debug("Download study with patient_id: %s, study_uid: %s", patient_id, study_uid)
-        operator.fetch_study(
-            patient_id=patient_id,
-            study_uid=study_uid,
-            callback=callback,
-        )
+        with zipfile.ZipFile(studies_folder_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zip_file:
+            for selected_study in selected_studies:
+                study_data = selected_study.split("\\")
+                patient_id = study_data[0]
+                study_uid = study_data[1]
+                logger.debug("Download study with patient_id: %s, study_uid: %s", patient_id, study_uid)
+                operator.fetch_study(
+                    patient_id=patient_id,
+                    study_uid=study_uid,
+                    callback=callback,
+                )
 
-        logger.debug("Length of received datasets: %d", len(received_datasets))
-        
-        # Zip the study
-        with zipfile.ZipFile(study_folder_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zip_file:
-            for ds in received_datasets:
-                # Determine path inside zip
-                if settings.CREATE_SERIES_SUB_FOLDERS:
-                    series_folder_name = sanitize_filename(f"{ds.SeriesNumber}-{ds.SeriesDescription}")
-                    internal_path = f"{series_folder_name}/"
-                else:
-                    internal_path = ""
+                logger.debug("Length of fetched datasets: %d", len(study_datasets))
+                
+                # Zip the study
+                for ds in study_datasets:
+                    # Determine path inside zip
+                    if pseudonym:
+                        patient_folder = sanitize_filename(pseudonym)
+                    else:
+                        patient_folder = sanitize_filename(patient_id)
+                    study_date = datetime.strptime(ds.StudyDate, "%Y%m%d")
+                    study_time = datetime.strptime(ds.StudyTime, "%H%M%S")
+                    #modalities = ds.ModalitiesInStudy
+                    #modalities = ",".join(modalities)
+                    prefix = f"{study_date.strftime('%Y%m%d')}-{study_time.strftime('%H%M%S')}"
+                    study_folder = f"{patient_folder}/{prefix}" #-{modalities}
 
-                file_name = sanitize_filename(f"{ds.SOPInstanceUID}.dcm")
-                zip_internal_path = f"{internal_path}{file_name}"
+                    if settings.CREATE_SERIES_SUB_FOLDERS:
+                        series_folder_name = sanitize_filename(f"{ds.SeriesNumber}-{ds.SeriesDescription}")
+                        internal_path = f"{study_folder}/{series_folder_name}"
+                    else:
+                        internal_path = study_folder
 
-                stream = BytesIO()
-                write_dataset(ds, stream)
-                stream_bytes = stream.getvalue()
+                    file_name = sanitize_filename(f"{ds.SOPInstanceUID}.dcm")
+                    
+                    zip_internal_path = f"{internal_path}/{file_name}"
 
-                zip_file.writestr(zip_internal_path, stream_bytes)
+                    stream = BytesIO()
+                    write_dataset(ds, stream)
+                    stream_bytes = stream.getvalue()
 
-        return study_folder_zip_path.name
+                    zip_file.writestr(zip_internal_path, stream_bytes)
+                
+                study_datasets.clear()
+
+        return studies_folder_zip_path.name
         
 
 
