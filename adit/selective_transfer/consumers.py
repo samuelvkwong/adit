@@ -452,10 +452,6 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
 
         return zipped_studies_filename
 
-    #TODO: Do further preprocessing following adit.core.processor._download_to_folder  
-    # Alternative: async function that fetches study, pushed received datasets to a queue
-    # Have another async function process received datasets and write to zip file
-    # Possible to write to zip stream within callback? Write to io buffer and then 
     def download_studies(
         self,
         operator: DicomOperator,
