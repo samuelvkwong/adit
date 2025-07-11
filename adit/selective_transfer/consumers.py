@@ -131,7 +131,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             if form_valid:
                 in_progress_message = render_to_string("selective_transfer/_action_in_progress.html", {"loading_text": "Downloading ..."})
                 await self.send(in_progress_message)
-                asyncio.create_task(self._direct_download(form))
+                asyncio.create_task(self._direct_download(form, message_id))
             else:
                 form_error_response = await self._build_form_error_response(
                     form, "Please correct the form errors and download again."
@@ -143,7 +143,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
 
     @database_sync_to_async
     def get_form(
-        self, action: Literal["query", "transfer"], content: dict["str", Any]
+        self, action: Literal["query", "transfer", "direct_download"], content: dict["str", Any]
     ) -> SelectiveTransferJobForm:
         # Advanced options collapsed preference is not part of the form data itself,
         # so we have to pass it separately.
@@ -363,7 +363,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
 
         return job
     
-    async def _direct_download(self, form: SelectiveTransferJobForm) -> None:
+    async def _direct_download(self, form: SelectiveTransferJobForm, message_id: int) -> None:
         selected_studies: str | list[str] | None = form.data.get("selected_studies")
         if selected_studies is not None:
             if isinstance(selected_studies, str):
@@ -372,7 +372,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             loop = asyncio.get_event_loop()
             try:
                 await loop.run_in_executor(
-                    self.pool, self._prepare_and_send_download_response, form, selected_studies
+                    self.pool, self._prepare_and_send_download_response, form, selected_studies, message_id
                 )
             except HTTPError as e:
                 status_code = e.response.status_code
@@ -403,9 +403,12 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
                 await self.send(form_error_response)
 
     def _prepare_and_send_download_response(
-        self, form: SelectiveTransferJobForm, selected_studies: list[str]
+        self, form: SelectiveTransferJobForm, selected_studies: list[str], message_id: int
     ) -> None:
         with lock:
+            if message_id != self.current_message_id:
+                return
+
             source = cast(DicomNode, form.cleaned_data["source"])
             assert source.node_type == DicomNode.NodeType.SERVER
             operator = DicomOperator(source.dicomserver)
@@ -413,8 +416,9 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             self.query_operators.append(operator)
 
         try:
-            zip_file_name = self.prepare_download(operator, form, selected_studies)
-            self.send_download_response(form, zip_file_name)
+            zip_file_name = self.prepare_download(operator, form, selected_studies, message_id)
+            if message_id == self.current_message_id:
+                self.send_download_response(form, zip_file_name)
 
         except ConnectionError:
             # Ignore connection aborts (most probably from ourself)
@@ -433,6 +437,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         operator: DicomOperator,
         form: SelectiveTransferJobForm,
         selected_studies: list[str],
+        message_id: int,
     ) -> Path:
         download_folder = Path(settings.TEMP_DIR)
         dicom_manipulator = DicomManipulator()
@@ -450,6 +455,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             download_folder,
             modifier,
             pseudonym,
+            message_id,
         )
 
         return zipped_studies_filename
@@ -461,6 +467,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         download_folder: Path,
         modifier: Callable,
         pseudonym: str,
+        message_id: int,
     ):
         # Dynamically generate studies folder name
         prefix_studies_folder_name = "adit_selective_direct_download"
@@ -481,6 +488,9 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         
         with zipfile.ZipFile(studies_folder_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zip_file:
             for selected_study in selected_studies:
+                if message_id != self.current_message_id:
+                    break
+
                 study_data = selected_study.split("\\")
                 patient_id = study_data[0]
                 study_uid = study_data[1]
