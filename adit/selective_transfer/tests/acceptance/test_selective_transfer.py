@@ -137,3 +137,10 @@ def test_unpseudonymized_urgent_selective_transfer_with_dimse_server_and_convert
 
         # Assert
         expect(page.locator('dl:has-text("Success")')).to_be_visible()
+
+# @pytest.mark.acceptance
+# @pytest.mark.order("last")
+# @pytest.mark.django_db(transaction=True)
+# def test_unpseudonymized_selective_direct_download_with_dimse_server(
+#     page: Page, channels_live_server: ChannelsLiveServer
+# ):
