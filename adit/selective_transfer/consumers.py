@@ -2,8 +2,8 @@ import asyncio
 import contextlib
 import logging
 import threading
-import shutil
 import zipfile
+import secrets
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -460,8 +460,12 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         modifier: Callable,
         pseudonym: str,
     ):
-        # TODO: Dynamically generate studies folder name
-        studies_folder_name = "selected_studies"
+        # Dynamically generate studies folder name
+        prefix_studies_folder_name = "adit_selective_direct_download"
+        unique_id = secrets.token_hex(4)
+        current_date = datetime.now().strftime("%Y%m%d")
+        studies_folder_name = f"{prefix_studies_folder_name}_{unique_id}_{current_date}_{self.user.username}"
+        
         studies_folder_zip_path = download_folder / f"{studies_folder_name}.zip"
         
         study_datasets: list[Dataset] = []
