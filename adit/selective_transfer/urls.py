@@ -30,7 +30,7 @@ urlpatterns = [
         name="selective_transfer_help",
     ),
     path(
-        "download/<str:file_name>",
+        "download/<str:token>",
         SelectiveTransferDownloadStudyView.as_view(),
         name="selective_transfer_download_study",
     ),

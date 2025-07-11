@@ -18,6 +18,7 @@ from asgiref.sync import async_to_sync
 from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from crispy_forms.utils import render_crispy_form
+from django.core.signing import TimestampSigner
 from django.conf import settings
 from pydicom import Dataset
 
@@ -433,8 +434,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         form: SelectiveTransferJobForm,
         selected_studies: list[str],
     ) -> Path:
-        download_folder = Path("/tmp") #settings.TEMPORARY_DIRECTORY
-
+        download_folder = Path(settings.TEMP_DIR)
         dicom_manipulator = DicomManipulator()
         pseudonym = form.cleaned_data["pseudonym"]
 
@@ -534,9 +534,12 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         # Rerender form to remove potential previous error messages
         rendered_form = render_crispy_form(form)
 
+        signer = TimestampSigner()
+        token = signer.sign(zip_file_name)
+
         rendered_download_url = render_to_string(
             "selective_transfer/_download_url.html",
-            {"download": True, "file_name": zip_file_name},
+            {"download": True, "token": token, "file_name": zip_file_name},
         )
 
         async_to_sync(self.send)(rendered_form + rendered_download_url)

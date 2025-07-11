@@ -29,3 +29,6 @@ if env.bool("FORCE_DEBUG_TOOLBAR"):
 LOGGING["loggers"]["adit"]["level"] = "DEBUG"  # noqa: F405
 
 ENABLE_DICOM_DEBUG_LOGGER = False
+
+# Temporary Directory for Study Downloads
+TEMP_DIR = "/app/dicom_downloads"

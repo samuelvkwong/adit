@@ -2,7 +2,7 @@
     <div id="response">
         <div class="alert alert-success mt-3" role="alert">
             Successfully generated download link for the selected studies:
-            <a href="{% url 'selective_transfer_download_study' file_name %}">{{ file_name }}</a>
+            <a href="{% url 'selective_transfer_download_study' token %}">{{ file_name }}</a>
         </div>
     </div>
 {% endif %}
