@@ -107,7 +107,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
 
         if action == "query":
             if form_valid:
-                in_progress_message = render_to_string("selective_transfer/_query_in_progress.html")
+                in_progress_message = render_to_string("selective_transfer/_action_in_progress.html", {"loading_text": "Searching ..."})
                 await self.send(in_progress_message)
                 asyncio.create_task(self._make_query(form, message_id))
             else:
@@ -128,6 +128,8 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         elif action == "direct_download":
             logger.debug("Direct download action received.")
             if form_valid:
+                in_progress_message = render_to_string("selective_transfer/_action_in_progress.html", {"loading_text": "Downloading ..."})
+                await self.send(in_progress_message)
                 asyncio.create_task(self._direct_download(form))
             else:
                 form_error_response = await self._build_form_error_response(
