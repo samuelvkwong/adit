@@ -365,9 +365,21 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
     
     async def _direct_download(self, form: SelectiveTransferJobForm, message_id: int) -> None:
         selected_studies: str | list[str] | None = form.data.get("selected_studies")
-        if selected_studies is not None:
+        if not selected_studies:
+            form_error_response = await self._build_form_error_response(
+                form, "At least one study to download must be selected."
+            )
+            await self.send(form_error_response)
+        else:
             if isinstance(selected_studies, str):
                 selected_studies = [selected_studies]
+            
+            if len(selected_studies) > 3:
+                form_error_response = await self._build_form_error_response(
+                    form, "Maximum 3 studies for direct download are allowed."
+                )
+                await self.send(form_error_response)
+
 
             loop = asyncio.get_event_loop()
             try:
