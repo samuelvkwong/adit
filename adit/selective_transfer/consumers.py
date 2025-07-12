@@ -68,7 +68,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         logger.debug("Connected to WebSocket client.")
 
         self.user: User = self.scope["user"]
-        self.query_operators: list[DicomOperator] = []
+        self.dicom_operators: list[DicomOperator] = []
         self.current_message_id: int = 0
         self.pool = ThreadPoolExecutor()
 
@@ -161,9 +161,9 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
 
     async def _abort_operators(self) -> None:
         loop = asyncio.get_event_loop()
-        while self.query_operators:
-            for operator in self.query_operators[:]:
-                self.query_operators.remove(operator)
+        while self.dicom_operators:
+            for operator in self.dicom_operators[:]:
+                self.dicom_operators.remove(operator)
                 loop.call_soon_threadsafe(operator.abort)
 
     @database_sync_to_async
@@ -227,7 +227,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             assert source.node_type == DicomNode.NodeType.SERVER
             operator = DicomOperator(source.dicomserver)
 
-            self.query_operators.append(operator)
+            self.dicom_operators.append(operator)
 
         try:
             limit = settings.SELECTIVE_TRANSFER_RESULT_LIMIT
@@ -252,8 +252,8 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
 
         finally:
             with lock:
-                if operator in self.query_operators:
-                    self.query_operators.remove(operator)
+                if operator in self.dicom_operators:
+                    self.dicom_operators.remove(operator)
 
         return None
 
@@ -425,7 +425,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             assert source.node_type == DicomNode.NodeType.SERVER
             operator = DicomOperator(source.dicomserver)
 
-            self.query_operators.append(operator)
+            self.dicom_operators.append(operator)
 
         try:
             zip_file_name = self.prepare_download(operator, form, selected_studies, message_id)
@@ -439,8 +439,8 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
 
         finally:
             with lock:
-                if operator in self.query_operators:
-                    self.query_operators.remove(operator)
+                if operator in self.dicom_operators:
+                    self.dicom_operators.remove(operator)
 
         return None
 
