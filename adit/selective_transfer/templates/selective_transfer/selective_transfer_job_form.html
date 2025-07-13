@@ -40,9 +40,9 @@
         {% crispy form %}
         <input type="submit" name="action" value="query" class="d-none" />
         <input type="submit" name="action" value="reset" class="d-none" />
-        <div id="response">
+        <div id="query_response">
             {% if request.method == "GET" %}
-                {% include "selective_transfer/_query_hint.html" %}
+                {% include "selective_transfer/responses/partials/_query_hint.html" %}
             {% endif %}
         </div>
         <div id="download_response"></div>

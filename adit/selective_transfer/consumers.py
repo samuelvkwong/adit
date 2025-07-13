@@ -56,10 +56,23 @@ async def async_lock(_lock):
         _lock.release()
 
 
-def render_error_message(message) -> str:
+def render_error_message(message, wrapper="query") -> str:
     return render_to_string(
-        "selective_transfer/_error_message.html",
-        {"error_message": str(message)},
+        f"selective_transfer/responses/wrappers/_{wrapper}_response.html",
+        {
+            "inner_template": "selective_transfer/responses/partials/_error_message.html",
+            "error_message": str(message),
+        }
+    )
+
+def render_in_progress_message(message, wrapper="query") -> str:
+    return render_to_string(
+        f"selective_transfer/responses/wrappers/_{wrapper}_response.html",
+        {
+            "inner_template": "selective_transfer/responses/partials/_in_progress.html",
+            "loading_text": str(message),
+            "action": str(wrapper),
+        }
     )
 
 
@@ -68,8 +81,10 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         logger.debug("Connected to WebSocket client.")
 
         self.user: User = self.scope["user"]
-        self.dicom_operators: list[DicomOperator] = []
-        self.current_message_id: int = 0
+        self.query_operators: list[DicomOperator] = []
+        self.download_operators: list[DicomOperator] = []
+        self.current_query_message_id: int = 0
+        self.current_download_message_id: int = 0
         self.pool = ThreadPoolExecutor()
 
         await self.accept()
@@ -86,20 +101,52 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             return
 
         action: str = content.get("action", "")
-        if action not in ["query", "cancel", "reset", "transfer", "direct_download"]:
+        if action not in ["query", "query_cancel", "reset", "transfer", "download", "download_cancel"]:
             await self.send(render_error_message(f"Invalid action to process: {action}"))
             return
 
         async with async_lock(lock):
-            # First we abort all operators as we received a new command what to do
-            self.current_message_id += 1
-            message_id = self.current_message_id
-            await self._abort_operators()
+            # We abort the query operators if the action is a query, or query cancel
+            # Increment the message id for queries
+            # We abort the download operators if the action is a download, or download cancel
+            # Increment the message id for downloads
+            # We abort both operators if the action is a transfer
+            if action == "query" or action == "query_cancel":
+                self.current_query_message_id += 1
+                query_message_id = self.current_query_message_id
+                await self._abort_query_operators()
+            elif action == "download" or action == "download_cancel":
+                self.current_download_message_id += 1
+                download_message_id = self.current_download_message_id
+                await self._abort_download_operators()
+            else:
+                await self._abort_operators()
 
-        if action == "cancel" or action == "reset":
-            # The connectors are already aborted, so we can just update the UI
-            query_hint = render_to_string("selective_transfer/_query_hint.html")
+        if action == "query_cancel":
+            # Render the query hint but do not reset the download response
+            query_hint = render_to_string(
+                "selective_transfer/responses/wrappers/_query_response.html",
+                {
+                    "inner_template": "selective_transfer/responses/partials/_query_hint.html"
+                }
+            )            
             await self.send(query_hint)
+            return
+        elif action == "download_cancel":
+            # Render an empty download response but keep the query response
+            empty_download = render_to_string("selective_transfer/responses/wrappers/_download_response.html")
+            await self.send(empty_download)
+            return
+        elif action == "reset":
+            # The connectors are already aborted, so we can just update the UI
+            query_hint = render_to_string(
+                "selective_transfer/responses/wrappers/_query_response.html",
+                {
+                    "inner_template": "selective_transfer/responses/partials/_query_hint.html"
+                }
+            )
+            empty_download = render_to_string("selective_transfer/responses/wrappers/_download_response.html")
+            await self.send(query_hint + empty_download)
             return
 
         # We are now in a query or transfer action so we have to process the form
@@ -108,9 +155,9 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
 
         if action == "query":
             if form_valid:
-                in_progress_message = render_to_string("selective_transfer/_query_in_progress.html", {"loading_text": "Searching ..."})
+                in_progress_message = render_in_progress_message("Searching ...")
                 await self.send(in_progress_message)
-                asyncio.create_task(self._make_query(form, message_id))
+                asyncio.create_task(self._make_query(form, query_message_id))
             else:
                 form_error_response = await self._build_form_error_response(
                     form, "Please correct the form errors and search again."
@@ -122,19 +169,19 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
                 asyncio.create_task(self.make_transfer(form))
             else:
                 form_error_response = await self._build_form_error_response(
-                    form, "Please correct the form errors and transfer again."
+                    form, "Please correct the form errors and transfer again.", "download"
                 )
                 await self.send(form_error_response)
         
-        elif action == "direct_download":
+        elif action == "download":
             logger.debug("Direct download action received.")
             if form_valid:
-                in_progress_message = render_to_string("selective_transfer/_download_in_progress.html", {"loading_text": "Downloading ..."})
+                in_progress_message = render_in_progress_message("Downloading ...", "download")
                 await self.send(in_progress_message)
-                asyncio.create_task(self._direct_download(form, message_id))
+                asyncio.create_task(self._direct_download(form, download_message_id))
             else:
                 form_error_response = await self._build_form_error_response(
-                    form, "Please correct the form errors and download again."
+                    form, "Please correct the form errors and download again.", "download"
                 )
                 await self.send(form_error_response)
 
@@ -143,7 +190,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
 
     @database_sync_to_async
     def get_form(
-        self, action: Literal["query", "transfer", "direct_download"], content: dict["str", Any]
+        self, action: Literal["query", "transfer", "download"], content: dict["str", Any]
     ) -> SelectiveTransferJobForm:
         # Advanced options collapsed preference is not part of the form data itself,
         # so we have to pass it separately.
@@ -159,12 +206,22 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             advanced_options_collapsed=advanced_options_collapsed,
         )
 
-    async def _abort_operators(self) -> None:
+    async def _abort_operator_list(self, operators: list) -> None:
         loop = asyncio.get_event_loop()
-        while self.dicom_operators:
-            for operator in self.dicom_operators[:]:
-                self.dicom_operators.remove(operator)
+        while operators:
+            for operator in operators[:]:
+                operators.remove(operator)
                 loop.call_soon_threadsafe(operator.abort)
+
+    async def _abort_query_operators(self) -> None:
+        await self._abort_operator_list(self.query_operators)
+
+    async def _abort_download_operators(self) -> None:
+        await self._abort_operator_list(self.download_operators)
+
+    async def _abort_operators(self) -> None:
+        await self._abort_query_operators()
+        await self._abort_download_operators()
 
     @database_sync_to_async
     def check_permission(self) -> str | None:
@@ -177,9 +234,9 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         return None
 
     @database_sync_to_async
-    def _build_form_error_response(self, form: SelectiveTransferJobForm, message: str) -> str:
+    def _build_form_error_response(self, form: SelectiveTransferJobForm, message: str, wrapper="query") -> str:
         rendered_form: str = render_crispy_form(form)
-        rendered_error_message: str = render_error_message(message)
+        rendered_error_message: str = render_error_message(message, wrapper)
         return rendered_form + rendered_error_message
 
     async def _make_query(self, form: SelectiveTransferJobForm, message_id: int) -> None:
@@ -220,14 +277,14 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         self, form: SelectiveTransferJobForm, message_id: int
     ) -> None:
         with lock:
-            if message_id != self.current_message_id:
+            if message_id != self.current_query_message_id:
                 return
 
             source = cast(DicomNode, form.cleaned_data["source"])
             assert source.node_type == DicomNode.NodeType.SERVER
             operator = DicomOperator(source.dicomserver)
 
-            self.dicom_operators.append(operator)
+            self.query_operators.append(operator)
 
         try:
             limit = settings.SELECTIVE_TRANSFER_RESULT_LIMIT
@@ -238,11 +295,11 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             for study in studies:
                 received_studies.append(study)
                 max_results_reached = len(received_studies) >= limit
-                if message_id == self.current_message_id:
+                if message_id == self.current_query_message_id:
                     self.send_query_response(form, received_studies, max_results_reached)
 
             if not received_studies:
-                if message_id == self.current_message_id:
+                if message_id == self.current_query_message_id:
                     self.send_query_response(form, received_studies, False)
 
         except ConnectionError:
@@ -252,8 +309,8 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
 
         finally:
             with lock:
-                if operator in self.dicom_operators:
-                    self.dicom_operators.remove(operator)
+                if operator in self.query_operators:
+                    self.query_operators.remove(operator)
 
         return None
 
@@ -294,12 +351,13 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         )
 
         rendered_query_results = render_to_string(
-            "selective_transfer/_query_results.html",
+            "selective_transfer/responses/wrappers/_query_response.html",
             {
+                "inner_template": "selective_transfer/responses/partials/_query_results.html",
                 "query": True,
                 "query_results": studies,
                 "max_results_reached": max_results_reached,
-            },
+            }
         )
 
         async_to_sync(self.send)(rendered_form + rendered_query_results)
@@ -325,9 +383,14 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             return rendered_form + rendered_error_message
 
         rendered_created_job = render_to_string(
-            "selective_transfer/_created_job.html",
-            {"transfer": True, "created_job": job},
+            "selective_transfer/responses/wrappers/_query_response.html",
+            {
+                "inner_template": "selective_transfer/responses/partials/_created_job.html",
+                "transfer": True,
+                "created_job": job,
+            }
         )
+
         return rendered_form + rendered_created_job
 
     def transfer_selected_studies(
@@ -367,7 +430,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         selected_studies: str | list[str] | None = form.data.get("selected_studies")
         if not selected_studies:
             form_error_response = await self._build_form_error_response(
-                form, "At least one study to download must be selected."
+                form, "At least one study to download must be selected.", "download"
             )
             await self.send(form_error_response)
         else:
@@ -376,7 +439,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             
             if len(selected_studies) > 3:
                 form_error_response = await self._build_form_error_response(
-                    form, "Maximum 3 studies for direct download are allowed."
+                    form, "Maximum 3 studies for direct download are allowed.", "download"
                 )
                 await self.send(form_error_response)
 
@@ -398,7 +461,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
                 elif status_code == 502:  # Bad gateway
                     additional_error_text = "The source is not available."
                 form_error_response = await self._build_form_error_response(
-                    form, f"Something went wrong at your requested source. {additional_error_text}"
+                    form, f"Something went wrong at your requested source. {additional_error_text}", "download"
                 )
                 await self.send(form_error_response)
             except (DicomError, RetriableDicomError):
@@ -406,11 +469,12 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
                     form,
                     "Something went wrong at your requested source. "
                     "A Dicom Error has occured at the source.",
+                    "download"
                 )
                 await self.send(form_error_response)
             except Exception:
                 form_error_response = await self._build_form_error_response(
-                    form, "Something went wrong."
+                    form, "Something went wrong.", "download"
                 )
                 await self.send(form_error_response)
 
@@ -418,18 +482,18 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         self, form: SelectiveTransferJobForm, selected_studies: list[str], message_id: int
     ) -> None:
         with lock:
-            if message_id != self.current_message_id:
+            if message_id != self.current_download_message_id:
                 return
 
             source = cast(DicomNode, form.cleaned_data["source"])
             assert source.node_type == DicomNode.NodeType.SERVER
             operator = DicomOperator(source.dicomserver)
 
-            self.dicom_operators.append(operator)
+            self.download_operators.append(operator)
 
         try:
             zip_file_name = self.prepare_download(operator, form, selected_studies, message_id)
-            if message_id == self.current_message_id:
+            if message_id == self.current_download_message_id:
                 self.send_download_response(form, zip_file_name)
 
         except ConnectionError:
@@ -439,8 +503,8 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
 
         finally:
             with lock:
-                if operator in self.dicom_operators:
-                    self.dicom_operators.remove(operator)
+                if operator in self.download_operators:
+                    self.download_operators.remove(operator)
 
         return None
 
@@ -500,7 +564,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         
         with zipfile.ZipFile(studies_folder_zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zip_file:
             for selected_study in selected_studies:
-                if message_id != self.current_message_id:
+                if message_id != self.current_download_message_id:
                     break
 
                 study_data = selected_study.split("\\")
@@ -560,8 +624,13 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
         token = signer.sign(zip_file_name)
 
         rendered_download_url = render_to_string(
-            "selective_transfer/_download_results.html",
-            {"download": True, "token": token, "file_name": zip_file_name},
+            "selective_transfer/responses/wrappers/_download_response.html",
+            {
+                "inner_template": "selective_transfer/responses/partials/_download_result.html",
+                "download": True, 
+                "token": token, 
+                "file_name": zip_file_name
+            }
         )
 
         async_to_sync(self.send)(rendered_form + rendered_download_url)
