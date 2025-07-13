@@ -433,6 +433,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
                 form, "At least one study to download must be selected.", "download"
             )
             await self.send(form_error_response)
+            return
         else:
             if isinstance(selected_studies, str):
                 selected_studies = [selected_studies]
@@ -442,6 +443,7 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
                     form, "Maximum 3 studies for direct download are allowed.", "download"
                 )
                 await self.send(form_error_response)
+                return
 
 
             loop = asyncio.get_event_loop()
