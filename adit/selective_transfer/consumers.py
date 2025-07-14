@@ -106,20 +106,24 @@ class SelectiveTransferConsumer(AsyncJsonWebsocketConsumer):
             return
 
         async with async_lock(lock):
-            # We abort the query operators if the action is a query, or query cancel
+            # We abort the query operators if the action is a query, query cancel, or transfer
             # Increment the message id for queries
             # We abort the download operators if the action is a download, or download cancel
             # Increment the message id for downloads
-            # We abort both operators if the action is a transfer
-            if action == "query" or action == "query_cancel":
+            # We abort both operators if the action is a reset
+            if action in ["query", "query_cancel", "transfer"]:
                 self.current_query_message_id += 1
                 query_message_id = self.current_query_message_id
                 await self._abort_query_operators()
-            elif action == "download" or action == "download_cancel":
+            elif action in ["download", "download_cancel"]:
                 self.current_download_message_id += 1
                 download_message_id = self.current_download_message_id
                 await self._abort_download_operators()
             else:
+                self.current_query_message_id += 1
+                self.current_download_message_id += 1
+                query_message_id = self.current_query_message_id
+                download_message_id = self.current_download_message_id
                 await self._abort_operators()
 
         if action == "query_cancel":
