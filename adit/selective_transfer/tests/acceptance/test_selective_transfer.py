@@ -1,3 +1,5 @@
+import io
+import zipfile
 import tempfile
 from collections import Counter
 from datetime import datetime
@@ -138,9 +140,87 @@ def test_unpseudonymized_urgent_selective_transfer_with_dimse_server_and_convert
         # Assert
         expect(page.locator('dl:has-text("Success")')).to_be_visible()
 
-# @pytest.mark.acceptance
-# @pytest.mark.order("last")
-# @pytest.mark.django_db(transaction=True)
-# def test_unpseudonymized_selective_direct_download_with_dimse_server(
-#     page: Page, channels_live_server: ChannelsLiveServer
-# ):
+@pytest.mark.acceptance
+@pytest.mark.order("last")
+@pytest.mark.django_db(transaction=True)
+def test_unpseudonymized_selective_direct_download_with_dimse_server(
+    page: Page, channels_live_server: ChannelsLiveServer
+):
+    # Arrange
+    user = create_and_login_example_user(page, channels_live_server.url)
+    group = create_selective_transfer_group()
+    add_user_to_group(user, group)
+    add_permission(group, SelectiveTransferJob, "can_process_urgently")
+    add_permission(group, SelectiveTransferJob, "can_transfer_unpseudonymized")
+
+    orthancs = setup_dimse_orthancs()
+    grant_access(group, orthancs[0], source=True)
+    grant_access(group, orthancs[1], destination=True)
+
+    # Act
+    page.goto(channels_live_server.url + "/selective-transfer/jobs/new/")
+    page.get_by_label("Source").select_option(label="DICOM Server Orthanc Test Server 1")
+    page.get_by_label("Destination").select_option(label="DICOM Server Orthanc Test Server 2")
+    page.get_by_label("Modality").click()
+    page.get_by_label("Modality").fill("MR")
+    page.get_by_label("Modality").press("Enter")
+    page.locator('tr:has-text("1008"):has-text("2020") input').click()
+    page.locator('tr:has-text("1003"):has-text("2020") input').click()
+    page.locator('button:has-text("Direct Download")').click()
+    
+    link_locator = page.locator('a:has-text("adit_selective_direct_download")')
+    link_locator.wait_for()
+
+    # Intercept the download and capture it
+    with page.expect_download() as download_info:
+        link_locator.click()
+
+    download = download_info.value
+
+    # Read file content directly
+    path = download.path()
+    with open(path, "rb") as f:
+        zip_bytes = io.BytesIO(f.read())
+
+    # Inspect zip file contents
+    with zipfile.ZipFile(zip_bytes) as zf:
+        actual_files = set(zf.namelist())
+        expected_files = {
+            '1003/20200202-172931/1-AAHead_Scout/1.3.12.2.1107.5.2.18.41369.2020070517301070393121257.dcm',
+            '1003/20200202-172931/1-AAHead_Scout/1.3.12.2.1107.5.2.18.41369.2020070517301070783621262.dcm',
+            '1003/20200202-172931/1-AAHead_Scout/1.3.12.2.1107.5.2.18.41369.2020070517301071809821266.dcm',
+            '1003/20200202-172931/1-AAHead_Scout/1.3.12.2.1107.5.2.18.41369.2020070517301076038721300.dcm',
+            '1003/20200202-172931/5-t2_tse_tra 5mm/1.3.12.2.1107.5.2.18.41369.2020070517335682449622068.dcm',
+            '1003/20200202-172931/5-t2_tse_tra 5mm/1.3.12.2.1107.5.2.18.41369.2020070517335685098622070.dcm',
+            '1003/20200202-172931/5-t2_tse_tra 5mm/1.3.12.2.1107.5.2.18.41369.2020070517335752885122121.dcm',
+            '1003/20200202-172931/5-t2_tse_tra 5mm/1.3.12.2.1107.5.2.18.41369.2020070517335753271722124.dcm',
+            '1003/20200202-172931/8-SWI_Images/1.3.12.2.1107.5.2.18.41369.2020070517415775163724138.dcm',
+            '1003/20200202-172931/8-SWI_Images/1.3.12.2.1107.5.2.18.41369.2020070517415775190624139.dcm',
+            '1003/20200202-172931/8-SWI_Images/1.3.12.2.1107.5.2.18.41369.2020070517415775215724140.dcm',
+            '1003/20200202-172931/8-SWI_Images/1.3.12.2.1107.5.2.18.41369.2020070517415775243224141.dcm',
+            '1008/20200705-152021/12-SWI_Images/1.3.12.2.1107.5.2.18.41369.2020070515402056923907162.dcm',
+            '1008/20200705-152021/12-SWI_Images/1.3.12.2.1107.5.2.18.41369.2020070515402056944307163.dcm',
+            '1008/20200705-152021/12-SWI_Images/1.3.12.2.1107.5.2.18.41369.2020070515402056967207164.dcm',
+            '1008/20200705-152021/12-SWI_Images/1.3.12.2.1107.5.2.18.41369.2020070515402056989807165.dcm',
+            '1008/20200705-152021/5-t2_tse_tra 5mm/1.3.12.2.1107.5.2.18.41369.2020070515244557481001938.dcm',
+            '1008/20200705-152021/5-t2_tse_tra 5mm/1.3.12.2.1107.5.2.18.41369.2020070515244567845401945.dcm',
+            '1008/20200705-152021/5-t2_tse_tra 5mm/1.3.12.2.1107.5.2.18.41369.2020070515244635389301987.dcm',
+            '1008/20200705-152021/5-t2_tse_tra 5mm/1.3.12.2.1107.5.2.18.41369.2020070515244643423901991.dcm',
+            '1008/20200705-152021/1-AAHead_Scout/1.3.12.2.1107.5.2.18.41369.2020070515210239042101267.dcm',
+            '1008/20200705-152021/1-AAHead_Scout/1.3.12.2.1107.5.2.18.41369.2020070515210239143201271.dcm',
+            '1008/20200705-152021/1-AAHead_Scout/1.3.12.2.1107.5.2.18.41369.2020070515210240008201276.dcm',
+            '1008/20200705-152021/1-AAHead_Scout/1.3.12.2.1107.5.2.18.41369.2020070515210240107701280.dcm',
+            '1008/20200705-152021/13-t2_ciss3d_tra_iso_0.7/1.3.12.2.1107.5.2.18.41369.202007051544083459807574.dcm',
+            '1008/20200705-152021/13-t2_ciss3d_tra_iso_0.7/1.3.12.2.1107.5.2.18.41369.202007051544085778807583.dcm',
+            '1008/20200705-152021/13-t2_ciss3d_tra_iso_0.7/1.3.12.2.1107.5.2.18.41369.202007051544088280407585.dcm',
+            '1008/20200705-152021/13-t2_ciss3d_tra_iso_0.7/1.3.12.2.1107.5.2.18.41369.2020070515440755768407556.dcm',
+            '1008/20200705-152021/10-DWI_4scan_trace_tra_ADC/1.3.12.2.1107.5.2.18.41369.2020070515373869419806807.dcm',
+            '1008/20200705-152021/10-DWI_4scan_trace_tra_ADC/1.3.12.2.1107.5.2.18.41369.2020070515373874862906815.dcm',
+            '1008/20200705-152021/10-DWI_4scan_trace_tra_ADC/1.3.12.2.1107.5.2.18.41369.2020070515373957500306935.dcm',
+            '1008/20200705-152021/10-DWI_4scan_trace_tra_ADC/1.3.12.2.1107.5.2.18.41369.2020070515373962949206943.dcm',
+            '1008/20200705-152021/9-DWI_4scan_trace_tra_TRACEW/1.3.12.2.1107.5.2.18.41369.2020070515373869473706808.dcm',
+            '1008/20200705-152021/9-DWI_4scan_trace_tra_TRACEW/1.3.12.2.1107.5.2.18.41369.2020070515373873877806813.dcm',
+            '1008/20200705-152021/9-DWI_4scan_trace_tra_TRACEW/1.3.12.2.1107.5.2.18.41369.2020070515373952028006928.dcm',
+            '1008/20200705-152021/9-DWI_4scan_trace_tra_TRACEW/1.3.12.2.1107.5.2.18.41369.2020070515373956506206933.dcm',
+        }
+        assert actual_files == expected_files

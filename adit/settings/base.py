@@ -431,3 +431,6 @@ SKIP_ELEMENTS_ANONYMIZATION = [
     "StudyDate",
     "StudyTime",
 ]
+
+# Temporary Directory for Study Downloads
+TEMP_DIR = "/app/dicom_downloads"
